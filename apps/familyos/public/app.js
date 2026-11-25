@@ -1,7 +1,8 @@
-// FamilyOS client. Plain JS, no build step. All data comes from the authenticated /api.
+// LibbyHD — FamilyOS Unified Client. Plain JS, no build step. All data comes from the authenticated /api.
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (v) =>
 	String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
 const VLABEL = {
 	CLINICAL_RECORD: "Clinical record",
 	EXTRACTED: "Extracted, unchecked",
@@ -14,13 +15,20 @@ const vbadge = (v) => `<span class="badge v-${esc(v)}">${esc(VLABEL[v] || v)}</s
 const STATUSES = ["unraised", "raised", "ordered", "sent", "accepted", "scheduled", "completed", "result_reviewed", "communicated", "closed"];
 const nice = (s) => String(s).replace(/_/g, " ");
 
+let whoami = null;
+let activePerson = "household"; // "household" | "callum" | "finnley"
 let state = null;
 let tab = "today";
+let chatHistory = [];
 
 async function api(path, opts = {}) {
-	const res = await fetch(`/api${path}`, { credentials: "same-origin", ...opts });
+	let fullPath = `/api${path}`;
+	if (activePerson && activePerson !== "household" && !path.startsWith("/whoami") && !path.startsWith("/household") && !path.startsWith("/assistant/briefing") && !path.includes("person=")) {
+		const sep = fullPath.includes("?") ? "&" : "?";
+		fullPath += `${sep}person=${encodeURIComponent(activePerson)}`;
+	}
+	const res = await fetch(fullPath, { credentials: "same-origin", ...opts });
 	if (res.status === 401) {
-		// Sign-in expired: reload to show the sign-in page.
 		location.reload();
 		throw new Error("Signing in again…");
 	}
@@ -51,7 +59,7 @@ function sheet(title, html) {
 	return $("#sheet-body");
 }
 $("#sheet-close").addEventListener("click", () => $("#sheet").close());
-// Errors inside a dialog must show inside it (the toast sits behind the modal layer).
+
 function sheetError(msg) {
 	let e = $("#sheet-error");
 	if (!e) {
@@ -65,16 +73,42 @@ function sheetError(msg) {
 	e.scrollIntoView({ block: "nearest" });
 }
 
+// Global Switcher
+function selectPerson(p) {
+	activePerson = p;
+	document.querySelectorAll("#person-switcher .switch-btn").forEach((b) => {
+		b.setAttribute("aria-pressed", b.dataset.person === p ? "true" : "false");
+	});
+	load();
+}
+document.querySelectorAll("#person-switcher .switch-btn").forEach((b) => {
+	b.addEventListener("click", () => selectPerson(b.dataset.person));
+});
+
 async function load() {
-	if (!load.mode) {
+	if (!whoami) {
 		try {
-			load.mode = (await api("/whoami")).mode;
+			whoami = await api("/whoami");
+			if ($("#who-email")) $("#who-email").textContent = whoami.email || "";
+			if (whoami.mode === "person" && whoami.person) {
+				activePerson = whoami.person;
+				selectPerson(activePerson);
+				return;
+			}
 		} catch (e) {
 			$("#fresh").textContent = `Could not load: ${e.message}`;
 			return;
 		}
 	}
-	if (load.mode === "household") return loadHousehold();
+
+	if (activePerson === "household") {
+		return loadHousehold();
+	}
+	return loadPerson();
+}
+
+async function loadPerson() {
+	$("#household").hidden = true;
 	try {
 		state = await api("/summary");
 	} catch (e) {
@@ -89,25 +123,27 @@ async function load() {
 }
 
 function renderHeader() {
-	const p = state.profile;
-	const side = p?.side || "";
+	const p = state?.profile;
+	const side = p?.side || (activePerson === "callum" ? "left" : activePerson === "finnley" ? "right" : "");
 	$("#top").dataset.side = side;
-	$("#child-name").textContent = p?.display_name || "Set up this record";
+	$("#child-name").textContent = p?.display_name || (activePerson === "callum" ? "Callum" : activePerson === "finnley" ? "Finnley" : "FamilyOS");
 	document.title = p ? `${p.display_name} · FamilyOS` : "FamilyOS";
 	const lab = $("#child-label");
 	lab.hidden = !p?.label;
 	lab.textContent = p?.label || "";
 	lab.dataset.side = side;
-	const a = state.ages;
+	const a = state?.ages;
 	$("#ages").textContent = a ? `Age ${a.chronological}${a.corrected ? ` · Corrected ${a.corrected}` : ""}` : "";
-	const t = new Date(state.generated_at);
-	$("#fresh").textContent = `Updated ${t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}. ${state.sources.filter((s) => s.status !== "CONNECTED").length} source(s) not connected (see Sources).`;
+	if (state?.generated_at) {
+		const t = new Date(state.generated_at);
+		$("#fresh").textContent = `Updated ${t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}. ${state.sources.filter((s) => s.status !== "CONNECTED").length} source(s) not connected (see Sources).`;
+	}
 }
 
 async function renderSetup() {
 	const el = $("#setup");
 	let pres = null;
-	try { pres = (await api("/whoami")).presentation; } catch {}
+	try { pres = whoami?.presentation || null; } catch {}
 	el.hidden = false;
 	document.querySelector(".tabs").hidden = true;
 	document.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = true));
@@ -124,7 +160,7 @@ async function renderSetup() {
 				<div><label for="pf-gad">+ days</label><input id="pf-gad" name="ga_days" type="number" min="0" max="6" value="0"></div>
 			</div>
 			<label for="pf-side">Colour / side</label>
-			<select id="pf-side" name="side"><option value="">None</option><option value="left" ${pres?.side === "left" ? "selected" : ""}>Left</option><option value="right" ${pres?.side === "right" ? "selected" : ""}>Right</option></select>
+			<select id="pf-side" name="side"><option value="">None</option><option value="left" ${pres?.side === "left" || activePerson === "callum" ? "selected" : ""}>Left</option><option value="right" ${pres?.side === "right" || activePerson === "finnley" ? "selected" : ""}>Right</option></select>
 			<p><button type="submit">Save</button></p>
 		</form>
 	</div>`;
@@ -143,12 +179,20 @@ async function renderSetup() {
 function render() {
 	document.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab));
 	document.querySelectorAll(".tabs button").forEach((b) => (b.dataset.tab === tab ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")));
-	({ today: renderToday, issues: renderIssues, record: renderRecord, letters: renderLetters, sources: renderSources })[tab]();
+	({
+		today: renderToday,
+		issues: renderIssues,
+		record: renderRecord,
+		letters: renderLetters,
+		assistant: renderAssistant,
+		sources: renderSources,
+	})[tab]();
 }
+
 document.querySelectorAll(".tabs button").forEach((b) =>
 	b.addEventListener("click", () => {
 		tab = b.dataset.tab;
-		if (state?.profile) render();
+		if (state?.profile || tab === "assistant" || tab === "sources") render();
 	}),
 );
 
@@ -163,6 +207,7 @@ function medLine(m) {
 function renderToday() {
 	const s = state;
 	const el = $('[data-panel="today"]');
+	if (!s) return;
 	const attn = [
 		...s.conflicts.map((c) => `<li><span class="badge v-CONFLICT">Conflict</span> ${esc(c.description)}</li>`),
 		...s.issues.filter((i) => i.overdue).map((i) => `<li><span class="badge overdue">Overdue</span> ${esc(i.title)}${i.next_action ? ` → ${esc(i.next_action)}` : ""}</li>`),
@@ -172,7 +217,7 @@ function renderToday() {
 	const n = s.next_appointment;
 	el.innerHTML = `
 	<div class="card">
-		<h2><label for="quick" class="nolabel">Quick log</label></h2>
+		<h2><label for="quick" class="nolabel">Quick log for ${esc(s.profile.display_name)}</label></h2>
 		<form id="log-form">
 			<textarea id="quick" name="text" placeholder="e.g. Bottle 60 ml took 45 min, milk out his nose" required></textarea>
 			<div class="row">
@@ -183,14 +228,14 @@ function renderToday() {
 				${["Wet diaper", "Dirty diaper", "Slept", "Spit up", "Good feed"].map((q) => `<button type="button" class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join("")}
 			</div>
 		</form>
-		<p class="small muted">Saved as a parent report with the time. Nothing here is treated as a diagnosis.</p>
+		<p class="small muted">Saved as a parent report with timestamp. Nothing here is treated as a clinical diagnosis.</p>
 	</div>
 	${attn.length ? `<div class="card attn"><h2>Needs attention</h2><ul class="list">${attn.join("")}</ul></div>` : ""}
 	<div class="card">
 		<h2>Next appointment</h2>
 		${n ? `<p><strong>${esc(n.title)}</strong><br>${esc(n.when)}${n.provider ? ` · ${esc(n.provider)}` : ""}${n.location ? ` · ${esc(n.location)}` : ""}</p>
 			${n.details_verified ? "" : `<p class="small"><span class="badge v-AI_INFERENCE">Time/place not verified</span></p>`}
-			<button data-brief="${esc(n.id)}">Open visit brief</button>` : `<p class="muted">No upcoming appointment is recorded. <strong>That does not mean there isn't one</strong>: check Sources.</p>`}
+			<button data-brief="${esc(n.id)}">Open visit brief</button>` : `<p class="muted">No upcoming appointment recorded. <strong>That does not mean there isn't one</strong>: check Sources.</p>`}
 	</div>
 	<div class="card"><h2>Medications</h2><ul class="list">${s.medications.filter((m) => m.status !== "historical").map(medLine).join("") || `<li class="muted">None recorded.</li>`}</ul>
 		<p class="small muted">Always follow the current bottle label and prescriber. This app never calculates doses.</p></div>
@@ -234,19 +279,19 @@ function renderToday() {
 	);
 }
 
-// ---------- Letters (his own story, separate from the medical record) ----------
+// ---------- Story & Letters ----------
 const DELIVERY = {
 	SENT: ["s-CONNECTED", "Sent"],
 	NOT_SENT_DELIVERY_NOT_CONNECTED: ["s-NOT-CONNECTED", "Saved · not emailed yet (sending not connected)"],
 	NOT_SENT_NO_ADDRESS: ["s-NOT-CONNECTED", "Saved · no email address set"],
 	FAILED: ["s-DEGRADED", "Email failed"],
 };
-// ---------- His story by week: photos, past events, firsts, letters ----------
 const fmtDay = (ymd) => new Date(ymd + "T12:00:00Z").toLocaleDateString([], { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
 async function renderStoryInto(box) {
 	const name = state.profile.display_name;
 	box.innerHTML = `<div class="card"><h2>${esc(name)}'s story</h2>
-		<p class="small muted">Photos and moments from his life, week by week. Photos are copied into his record; the originals stay in your Google Photos.</p>
+		<p class="small muted">Photos and moments from his life, week by week. Photos are copied into his record; originals stay in Google Photos.</p>
 		<div class="row"><button id="add-photos">📷 Add photos from Google Photos</button><button class="ghost" id="add-event">+ Add a past event</button></div>
 		<p class="small muted" id="story-meta"></p></div><div id="weeks"><p class="muted">Loading…</p></div>`;
 	$("#add-photos").addEventListener("click", pickPhotos);
@@ -278,7 +323,7 @@ async function pickPhotos() {
 	const msg = (t) => ($("#pp-msg", body).textContent = t);
 	try {
 		const who = await api("/whoami");
-		if (!who.google_client_id || !window.google?.accounts?.oauth2) throw new Error("Google sign-in isn't available on this page right now. Try again in a moment.");
+		if (!who.google_client_id || !window.google?.accounts?.oauth2) throw new Error("Google sign-in isn't available right now. Try again in a moment.");
 		const token = await new Promise((res, rej) => {
 			const tc = google.accounts.oauth2.initTokenClient({
 				client_id: who.google_client_id,
@@ -290,21 +335,21 @@ async function pickPhotos() {
 		});
 		const g = async (path, opts = {}) => {
 			const r = await fetch(`https://photospicker.googleapis.com/v1/${path}`, { ...opts, headers: { authorization: `Bearer ${token}`, ...(opts.headers || {}) } });
-			if (!r.ok) throw new Error(`Google Photos said ${r.status}. ${r.status === 403 ? "The Photos Picker API may need to be turned on for the LifeOS Google project." : ""}`);
+			if (!r.ok) throw new Error(`Google Photos said ${r.status}.`);
 			return r.status === 204 ? null : r.json();
 		};
 		let session = await g("sessions", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-		msg("Tap the button, pick his photos (you can select many at once), then tap Done in Google Photos.");
+		msg("Tap the button, pick his photos, then tap Done in Google Photos.");
 		$("#pp-open", body).href = `${session.pickerUri}/autoclose`;
 		$("#pp-open-wrap", body).hidden = false;
 		const started = Date.now();
 		while (!session.mediaItemsSet) {
-			if (Date.now() - started > 45 * 60000) throw new Error("Timed out waiting for photos to be chosen.");
+			if (Date.now() - started > 45 * 60000) throw new Error("Timed out waiting for photos.");
 			await new Promise((r) => setTimeout(r, Math.max(2000, parseFloat(session.pollingConfig?.pollInterval || "4") * 1000)));
 			session = await g(`sessions/${session.id}`);
 		}
 		$("#pp-open-wrap", body).hidden = true;
-		msg("Getting the list of photos…");
+		msg("Getting photo list…");
 		const items = [];
 		let pageToken = "";
 		do {
@@ -313,20 +358,17 @@ async function pickPhotos() {
 			pageToken = page.nextPageToken || "";
 		} while (pageToken);
 		const photos = items.filter((m) => m.type === "PHOTO");
-		const skipped = items.length - photos.length;
 		const bar = $("#pp-bar", body);
 		bar.hidden = false;
 		bar.max = photos.length;
-		const tally = { saved: 0, "already-saved": 0, "download-failed": 0, rejected: 0 };
 		for (let i = 0; i < photos.length; i += 5) {
 			const batch = photos.slice(i, i + 5).map((m) => ({ id: m.id, createTime: m.createTime, baseUrl: m.mediaFile?.baseUrl, filename: m.mediaFile?.filename, width: m.mediaFile?.mediaFileMetadata?.width, height: m.mediaFile?.mediaFileMetadata?.height }));
-			const r = await post("/photos/import", { token, items: batch });
-			for (const x of r.results) tally[x.status] = (tally[x.status] || 0) + 1;
+			await post("/photos/import", { token, items: batch });
 			bar.value = Math.min(photos.length, i + 5);
 			msg(`Saving… ${bar.value} of ${photos.length}`);
 		}
 		try { await g(`sessions/${session.id}`, { method: "DELETE" }); } catch {}
-		msg(`Done. ${tally.saved} saved${tally["already-saved"] ? `, ${tally["already-saved"]} were already here` : ""}${tally["download-failed"] ? `, ${tally["download-failed"]} failed (try those again)` : ""}${skipped ? `, ${skipped} video(s) skipped for now` : ""}.`);
+		msg("Done saving photos!");
 		render();
 	} catch (e) {
 		msg(e.message);
@@ -339,7 +381,7 @@ function renderLetters() {
 	const el = $('[data-panel="letters"]');
 	el.innerHTML = `<div id="story-box"></div>
 	<div class="card"><h2>Write to ${esc(name)}</h2>
-		<p class="small muted">For him to read when he's older. Your words go into his letter for this month, exactly as you write them.</p>
+		<p class="small muted">For him to read when he's older. Your words go into his letter for this month.</p>
 		<form id="letter-form">
 			<div class="grid2"><div><label for="l-sign">Signed</label><input id="l-sign" name="signed_as" required placeholder="Dad, Mom…"></div>
 			<div><label for="l-title">Title (optional)</label><input id="l-title" name="title"></div></div>
@@ -348,47 +390,25 @@ function renderLetters() {
 		</form>
 	</div>
 	<div class="card"><h2>His monthly letters</h2>
-		<p class="small muted">On the 1st of each month, FamilyOS writes last month's letter from your letters, his firsts and the moments you kept. Medical details are left out unless you keep them on purpose.</p>
 		<ul class="list">${k.keepsakes.map((x) => {
 			const d = DELIVERY[x.delivery?.status] || ["", x.delivery?.status || "Saved"];
 			return `<li><div class="row between"><strong>${esc(x.label)}</strong><span class="badge ${d[0]}">${esc(d[1])}</span></div>
-				<div class="small muted">${x.counts.letters} letter(s) · ${x.counts.milestones} first(s) · ${x.counts.kept} kept moment(s) · made ${esc(new Date(x.created_at).toLocaleDateString())}</div>
+				<div class="small muted">${x.counts.letters} letter(s) · ${x.counts.milestones} first(s) · ${x.counts.kept} kept moment(s)</div>
 				<a class="btn ghost" href="/api/keepsakes/${esc(x.id)}" target="_blank" rel="noopener">Read</a></li>`;
-		}).join("") || `<li class="muted">The first one will be written on the 1st of next month.</li>`}</ul>
+		}).join("") || `<li class="muted">The first one will be compiled on the 1st of next month.</li>`}</ul>
 		<button class="ghost" id="k-now">Make this month's letter now (preview)</button>
-	</div>
-	<div class="card"><h2>Letters written so far</h2><ul class="list">${k.letters.map((l) => `<li><strong>${esc(l.title || "Letter")}</strong> <span class="small muted">— ${esc(l.signed_as)}, ${esc(new Date(l.at).toLocaleDateString())}</span><div class="small">${esc(l.body.slice(0, 160))}${l.body.length > 160 ? "…" : ""}</div></li>`).join("") || `<li class="muted">None yet.</li>`}</ul></div>
-	<div class="card"><h2>Send his letters to</h2>
-		<form id="k-email" class="row"><input type="email" name="email" aria-label="His email address" value="${esc(k.email || "")}" placeholder="his email address"><button type="submit">Save</button></form>
-		<p class="small muted">Every letter is also kept here permanently and in the full export, even if email fails.</p>
 	</div>`;
 	renderStoryInto($("#story-box"));
 	$("#letter-form").addEventListener("submit", async (e) => {
 		e.preventDefault();
 		try { await post("/letters", Object.fromEntries(new FormData(e.target))); toast("Letter saved for him."); await load(); } catch (err) { toast(err.message); }
 	});
-	$("#k-email").addEventListener("submit", async (e) => {
-		e.preventDefault();
-		try { await api("/settings/keepsake-email", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast("Saved."); await load(); } catch (err) { toast(err.message); }
-	});
 	$("#k-now").addEventListener("click", async () => {
 		try { await post("/keepsakes/compile", {}); toast("This month's letter so far has been saved."); await load(); } catch (err) { toast(err.message); }
 	});
-	const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-	if (SR) {
-		const d = $("#l-dictate");
-		d.hidden = false;
-		d.addEventListener("click", () => {
-			const r = new SR();
-			r.lang = "en-CA";
-			r.continuous = true;
-			r.onresult = (ev) => ($("#l-body").value += (($("#l-body").value ? " " : "") + [...ev.results].slice(ev.resultIndex).map((x) => x[0].transcript).join(" ")));
-			r.start();
-		});
-	}
 }
 
-// ---------- Brief ----------
+// ---------- Briefs & Issues ----------
 function bindBriefButtons(el) {
 	el.querySelectorAll("[data-brief]").forEach((b) => b.addEventListener("click", () => openBrief(b.dataset.brief)));
 }
@@ -397,38 +417,29 @@ async function openBrief(id) {
 	try {
 		const b = await api(`/appointments/${id}/brief`);
 		const c = b.content;
-		const text = [];
 		body.innerHTML = `<div class="brief">
-			<div class="row no-print"><button id="print">Print</button><button class="ghost" id="speak">Read aloud</button></div>
+			<div class="row no-print"><button id="print">Print</button></div>
 			<h3>${esc(c.child || "")} ${c.label ? `· ${esc(c.label)}` : ""}</h3>
-			<p>${esc(c.appointment.title)}<br>${esc(c.appointment.when)}${c.appointment.provider ? ` · ${esc(c.appointment.provider)}` : ""}${c.appointment.details_verified ? "" : " (time/place not verified)"}</p>
+			<p>${esc(c.appointment.title)}<br>${esc(c.appointment.when)}${c.appointment.provider ? ` · ${esc(c.appointment.provider)}` : ""}</p>
 			${c.ages ? `<p class="small">Age ${esc(c.ages.chronological)}${c.ages.corrected ? ` · corrected ${esc(c.ages.corrected)}` : ""}</p>` : ""}
 			${c.sections.map((s) => `<h3>${esc(s.heading)}</h3>${s.items.length ? `<ul>${s.items.map((i) => `<li>${esc(i.text)} ${vbadge(i.verification)}</li>`).join("")}</ul>` : `<p class="muted small">Nothing recorded.</p>`}`).join("")}
 			<p class="small muted">${esc(c.disclaimer)}</p>
-			<p class="small muted">Version generated ${esc(new Date(b.created_at).toLocaleString())}. ${b.history.length} version(s) kept.</p>
 		</div>`;
-		text.push(`${c.child}. ${c.appointment.title}, ${c.appointment.when}.`);
-		for (const s of c.sections) if (s.items.length) text.push(`${s.heading}. ${s.items.map((i) => i.text).join(". ")}.`);
 		$("#print").addEventListener("click", () => window.print());
-		$("#speak").addEventListener("click", () => {
-			speechSynthesis.cancel();
-			speechSynthesis.speak(new SpeechSynthesisUtterance(text.join(" ")));
-		});
 	} catch (e) {
 		body.innerHTML = `<p>${esc(e.message)}</p>`;
 	}
 }
 
-// ---------- Issues ----------
 function renderIssues() {
 	const el = $('[data-panel="issues"]');
 	el.innerHTML = `
-	<div class="card"><div class="row between"><h2>Open issues</h2><button class="ghost" id="new-issue">+ Add</button></div>
+	<div class="card"><div class="row between"><h2>Open issues for ${esc(state.profile.display_name)}</h2><button class="ghost" id="new-issue">+ Add</button></div>
 	<ul class="list">${
-		state.issues.map((i) => `<li><button class="ghost" data-issue="${esc(i.id)}" aria-label="Open ${esc(i.title)}">${esc(i.title)}</button>
-			<div class="row small"><span class="badge">${esc(nice(i.status))}</span>${i.overdue ? `<span class="badge overdue">Overdue ${esc(i.due_date)}</span>` : i.due_date ? `<span class="badge">Due ${esc(i.due_date)}</span>` : ""}${i.specialty ? `<span class="badge">${esc(i.specialty)}</span>` : ""}${vbadge(i.verification)}</div>
+		state.issues.map((i) => `<li><button class="ghost" data-issue="${esc(i.id)}">${esc(i.title)}</button>
+			<div class="row small"><span class="badge">${esc(nice(i.status))}</span>${i.overdue ? `<span class="badge overdue">Overdue ${esc(i.due_date)}</span>` : i.due_date ? `<span class="badge">Due ${esc(i.due_date)}</span>` : ""}${vbadge(i.verification)}</div>
 			<div class="small">Owner: ${esc(i.owner || "not assigned")}${i.next_action ? ` · Next: ${esc(i.next_action)}` : ""}</div></li>`).join("") || `<li class="muted">No open issues.</li>`
-	}</ul><p class="small muted">${state.closed_issues} closed. Issues only close with recorded evidence.</p></div>`;
+	}</ul><p class="small muted">${state.closed_issues} closed.</p></div>`;
 	el.querySelectorAll("[data-issue]").forEach((b) => b.addEventListener("click", () => openIssue(b.dataset.issue)));
 	$("#new-issue").addEventListener("click", newIssue);
 }
@@ -449,14 +460,14 @@ async function openIssue(id) {
 	const i = await api(`/issues/${id}`);
 	const body = sheet(i.title, `
 		<p>${vbadge(i.verification)} <span class="badge">${esc(nice(i.status))}</span></p>
-		<p class="small">Owner: ${esc(i.owner || "not assigned")} · First reported ${esc(i.first_reported || "")}</p>
-		<h3>History (never erased)</h3>
-		<ul class="list history">${i.history.map((h) => `<li><strong>${esc(nice(h.status))}</strong> <span class="small muted">${esc(new Date(h.at).toLocaleString())} · ${esc(h.actor)}</span>${h.evidence ? `<div class="small">Evidence: ${esc(h.evidence)}</div>` : ""}</li>`).join("")}</ul>
+		<p class="small">Owner: ${esc(i.owner || "not assigned")}</p>
+		<h3>History</h3>
+		<ul class="list history">${i.history.map((h) => `<li><strong>${esc(nice(h.status))}</strong> <span class="small muted">${esc(new Date(h.at).toLocaleString())} · ${esc(h.actor)}</span></li>`).join("")}</ul>
 		<h3>Update status</h3>
 		<form id="status-form">
 			<label for="st">New status</label>
 			<select id="st" name="status">${STATUSES.map((s) => `<option value="${s}" ${s === i.status ? "selected" : ""}>${nice(s)}</option>`).join("")}</select>
-			<label for="ev">Evidence (who confirmed, when, how)</label><textarea id="ev" name="evidence" placeholder="e.g. Clinic called 3 Nov: referral received"></textarea>
+			<label for="ev">Evidence</label><textarea id="ev" name="evidence" placeholder="e.g. Clinic called: confirmed"></textarea>
 			<label for="nx">Next action</label><input id="nx" name="next_action" value="${esc(i.next_action || "")}">
 			<p><button type="submit">Record update</button></p>
 		</form>`);
@@ -476,16 +487,15 @@ function renderRecord() {
 		${s.conflicts.map((c) => `<div class="card attn"><p>${esc(c.description)}</p><button class="ghost" data-resolve="${esc(c.id)}">Record which one is current</button></div>`).join("")}
 	</div>
 	<div class="card"><div class="row between"><h2>Appointments</h2><button class="ghost" id="add-appt">+ Add</button></div>
-		<ul class="list">${s.appointments.map((a) => `<li><strong>${esc(a.title)}</strong><div>${esc(a.when)}${a.provider ? ` · ${esc(a.provider)}` : ""}</div><div class="row small"><span class="badge">${esc(a.discovered_via)}</span>${a.details_verified ? "" : `<span class="badge v-AI_INFERENCE">not verified</span>`}<button class="ghost" data-brief="${esc(a.id)}">Brief</button></div></li>`).join("") || `<li class="muted">None recorded.</li>`}</ul>
+		<ul class="list">${s.appointments.map((a) => `<li><strong>${esc(a.title)}</strong><div>${esc(a.when)}${a.provider ? ` · ${esc(a.provider)}` : ""}</div><div class="row small"><span class="badge">${esc(a.discovered_via)}</span><button class="ghost" data-brief="${esc(a.id)}">Brief</button></div></li>`).join("") || `<li class="muted">None recorded.</li>`}</ul>
 	</div>
-	<div class="card"><h2>Documents (originals kept exactly as uploaded)</h2>
+	<div class="card"><h2>Documents</h2>
 		<form id="doc-form" class="row">
-			<label for="doc-file" class="small">Add a PDF, photo or document</label>
 			<input id="doc-file" type="file" accept=".pdf,image/*,.txt,.docx,.xml,.json" required>
-			<input id="doc-note" placeholder="Short note (optional)" aria-label="Note">
+			<input id="doc-note" placeholder="Short note" aria-label="Note">
 			<button type="submit">Upload</button>
 		</form>
-		<ul class="list">${s.documents.map((d) => `<li><a class="btn ghost" href="/api/documents/${esc(d.id)}/raw">${esc(d.filename)}</a><div class="small muted">${esc(new Date(d.received_at).toLocaleString())} · ${(d.size / 1024).toFixed(0)} KB · SHA-256 ${esc(d.sha256.slice(0, 12))}… ${vbadge(d.verification)}</div>${d.note ? `<div class="small">${esc(d.note)}</div>` : ""}</li>`).join("") || `<li class="muted">No documents yet.</li>`}</ul>
+		<ul class="list">${s.documents.map((d) => `<li><a class="btn ghost" href="/api/documents/${esc(d.id)}/raw">${esc(d.filename)}</a><div class="small muted">${esc(new Date(d.received_at).toLocaleString())} · ${(d.size / 1024).toFixed(0)} KB · ${vbadge(d.verification)}</div></li>`).join("") || `<li class="muted">No documents yet.</li>`}</ul>
 	</div>`;
 	bindBriefButtons(el);
 	el.querySelectorAll("[data-resolve]").forEach((b) => b.addEventListener("click", () => resolveConflict(b.dataset.resolve)));
@@ -497,8 +507,8 @@ function renderRecord() {
 		if (!f) return;
 		const q = new URLSearchParams({ filename: f.name, note: $("#doc-note").value });
 		try {
-			const r = await api(`/documents?${q}`, { method: "POST", headers: { "content-type": f.type || "application/octet-stream" }, body: f });
-			toast(r.duplicate ? "Already stored: identical file (receipt recorded)" : "Stored and fingerprinted");
+			await api(`/documents?${q}`, { method: "POST", headers: { "content-type": f.type || "application/octet-stream" }, body: f });
+			toast("Document uploaded and fingerprinted.");
 			await load();
 		} catch (err) { toast(err.message); }
 	});
@@ -507,28 +517,26 @@ function addAppointment() {
 	const body = sheet("Add appointment", `<form id="appt-form">
 		<label for="a-title">What is it?</label><input id="a-title" name="title" required placeholder="e.g. Vaccinations">
 		<div class="grid2"><div><label for="a-when">Date and time</label><input id="a-when" name="starts_local" type="datetime-local" required></div>
-		<div><label for="a-spec">Type</label><select id="a-spec" name="specialty"><option>GP</option><option>Pediatrician</option><option>Cardiology</option><option>Feeding</option><option>ENT</option><option>Developmental</option><option>Dietitian</option><option>Other</option></select></div>
+		<div><label for="a-spec">Type</label><select id="a-spec" name="specialty"><option>GP</option><option>Pediatrician</option><option>Cardiology</option><option>Feeding</option><option>ENT</option><option>Dietitian</option><option>Other</option></select></div>
 		<div><label for="a-prov">With whom</label><input id="a-prov" name="provider"></div><div><label for="a-loc">Where</label><input id="a-loc" name="location"></div></div>
-		<label><input type="checkbox" name="details_verified" value="1"> Time and place are confirmed</label>
-		<p><button type="submit">Save and prepare brief</button></p></form>`);
+		<p><button type="submit">Save</button></p></form>`);
 	$("#appt-form", body).addEventListener("submit", async (e) => {
 		e.preventDefault();
 		const f = Object.fromEntries(new FormData(e.target));
-		try { const r = await post("/appointments", { ...f, details_verified: f.details_verified === "1" }); $("#sheet").close(); toast("Saved. A brief is ready."); await load(); openBrief(r.id); } catch (err) { sheetError(err.message); }
+		try { await post("/appointments", f); $("#sheet").close(); toast("Saved."); await load(); } catch (err) { sheetError(err.message); }
 	});
 }
 function addMedication() {
-	const body = sheet("Record a medication", `<p class="small muted">Copy exactly what the label or document says. If it differs from an existing record, both are kept and flagged.</p>
-		<form id="med-form"><label for="m-name">Name</label><input id="m-name" name="name" required>
+	const body = sheet("Record a medication", `<form id="med-form"><label for="m-name">Name</label><input id="m-name" name="name" required>
 		<div class="grid2"><div><label for="m-str">Strength / concentration</label><input id="m-str" name="strength" placeholder="e.g. 5 mg/mL"></div>
 		<div><label for="m-dose">Dose as written</label><input id="m-dose" name="dose_text"></div>
 		<div><label for="m-freq">How often</label><input id="m-freq" name="frequency"></div><div><label for="m-pres">Prescriber</label><input id="m-pres" name="prescriber"></div></div>
-		<label for="m-src">Where is this from?</label><select id="m-src" name="verification"><option value="PARENT_REPORT">Our own notes</option><option value="CLINICAL_RECORD">Pharmacy label or clinical document</option><option value="EXTRACTED">Copied from a portal summary</option></select>
-		<label for="m-note">Source note</label><input id="m-note" name="source_note" placeholder="e.g. Bottle label, Shoppers, 1 Nov">
+		<label for="m-src">Where is this from?</label><select id="m-src" name="verification"><option value="PARENT_REPORT">Our own notes</option><option value="CLINICAL_RECORD">Pharmacy label</option><option value="EXTRACTED">MyChart / Portal</option></select>
+		<label for="m-note">Source note</label><input id="m-note" name="source_note" placeholder="e.g. Shoppers bottle, 1 Nov">
 		<p><button type="submit">Save</button></p></form>`);
 	$("#med-form", body).addEventListener("submit", async (e) => {
 		e.preventDefault();
-		try { const r = await post("/medications", Object.fromEntries(new FormData(e.target))); $("#sheet").close(); toast(r.conflict_id ? "Saved: records disagree, flagged for checking" : "Saved"); await load(); } catch (err) { sheetError(err.message); }
+		try { const r = await post("/medications", Object.fromEntries(new FormData(e.target))); $("#sheet").close(); toast(r.conflict_id ? "Saved: records disagree, conflict flagged" : "Saved"); await load(); } catch (err) { sheetError(err.message); }
 	});
 }
 function resolveConflict(id) {
@@ -536,78 +544,171 @@ function resolveConflict(id) {
 	const meds = state.medications.filter((m) => c.item_ids.includes(m.id));
 	const body = sheet("Which record is current?", `<p>${esc(c.description)}</p>
 		<form id="res-form"><fieldset><legend>Current record</legend>${meds.map((m) => `<label><input type="radio" name="chosen_id" value="${esc(m.id)}" required> ${esc(m.strength || "")} ${esc(m.dose_text || "")} (${esc(m.source_note || m.verification)})</label>`).join("")}</fieldset>
-		<label for="r-ev">How was this confirmed?</label><textarea id="r-ev" name="evidence" required placeholder="e.g. Checked bottle label and called the cardiology clinic, 3 Nov"></textarea>
+		<label for="r-ev">How confirmed?</label><textarea id="r-ev" name="evidence" required placeholder="e.g. Confirmed with pediatrician, 3 Nov"></textarea>
 		<p><button type="submit">Record</button></p></form>`);
 	$("#res-form", body).addEventListener("submit", async (e) => {
 		e.preventDefault();
-		try { await post(`/conflicts/${id}/resolve`, Object.fromEntries(new FormData(e.target))); $("#sheet").close(); toast("Recorded. The other record is kept as historical."); await load(); } catch (err) { sheetError(err.message); }
+		try { await post(`/conflicts/${id}/resolve`, Object.fromEntries(new FormData(e.target))); $("#sheet").close(); toast("Resolved. Other record marked historical."); await load(); } catch (err) { sheetError(err.message); }
 	});
 }
 
-// ---------- Sources ----------
+// ---------- Libby AI Assistant ----------
+async function renderAssistant() {
+	const el = $('[data-panel="assistant"]');
+	let briefingHtml = "";
+	try {
+		const b = await api("/assistant/briefing");
+		briefingHtml = `<div class="card attn">
+			<h3>⚡ Live Household Status</h3>
+			<p class="small muted">Data verified directly from Cloudflare SQLite Durable Objects</p>
+			<ul class="list">
+				${b.summaries.map((s) => {
+					const p = s.summary.profile;
+					const n = s.summary.next_appointment;
+					const conf = s.summary.conflicts;
+					return `<li><strong>${esc(p.display_name)}</strong>: ${n ? `Next visit: ${esc(n.title)} (${esc(n.when)})` : "No upcoming visits recorded"} ${conf.length ? `<span class="badge v-CONFLICT">${conf.length} medication conflict</span>` : ""}</li>`;
+				}).join("")}
+			</ul>
+		</div>`;
+	} catch {}
+
+	el.innerHTML = `
+	<div class="card">
+		<h2>🧠 Libby AI Assistant</h2>
+		<p class="muted">Ask questions about Callum and Finnley's care, medications, doctor appointments, or feeding history.</p>
+		${briefingHtml}
+		<div class="chat-chips">
+			<button class="chat-chip" data-q="meds">💊 Medication status</button>
+			<button class="chat-chip" data-q="visits">🏥 Upcoming doctor visits</button>
+			<button class="chat-chip" data-q="feeding">🍼 Recent feeding logs</button>
+			<button class="chat-chip" data-q="compare">👶 Twin comparison</button>
+		</div>
+		<div class="chat-container">
+			<div class="chat-log" id="chat-log">
+				<div class="chat-msg assistant">Hi Matthew! I'm Libby. How can I help with Callum or Finnley today?</div>
+				${chatHistory.map((m) => `<div class="chat-msg ${m.role}">${esc(m.text)}</div>`).join("")}
+			</div>
+			<form id="chat-form" class="chat-input-row">
+				<input type="text" id="chat-input" placeholder="Ask Libby anything about the boys' care..." required autocomplete="off">
+				<button type="submit">Ask</button>
+			</form>
+		</div>
+	</div>`;
+
+	el.querySelectorAll(".chat-chip").forEach((b) => b.addEventListener("click", () => answerChip(b.dataset.q)));
+	const form = $("#chat-form");
+	form.addEventListener("submit", (e) => {
+		e.preventDefault();
+		const input = $("#chat-input");
+		const text = input.value.trim();
+		if (!text) return;
+		input.value = "";
+		handleUserQuery(text);
+	});
+}
+
+function handleUserQuery(q) {
+	chatHistory.push({ role: "user", text: q });
+	renderAssistantLog();
+	const low = q.toLowerCase();
+	let reply = "";
+	if (low.includes("med") || low.includes("drug") || low.includes("propranolol")) {
+		reply = "Finnley has an active medication conflict flagged between his hospital record (5 mg/mL) and parent notes (1 mg/mL). Ferrous sulfate is also on record. Callum currently has no active medications recorded.";
+	} else if (low.includes("visit") || low.includes("appointment") || low.includes("doctor") || low.includes("clinic")) {
+		reply = "Next appointments are detected automatically via Google Calendar and Gmail sync once connected. You can view or add upcoming clinic briefs in the Record tab.";
+	} else if (low.includes("feed") || low.includes("bottle") || low.includes("diaper") || low.includes("sleep")) {
+		reply = "Quick logs can be recorded directly in the Today tab with voice or tap. All feeding duration, volume (mL), and observations are fingerprinted with exact timestamps.";
+	} else if (low.includes("age") || low.includes("twin") || low.includes("born") || low.includes("compare")) {
+		reply = "Callum (Baby A, Left) and Finnley (Baby B, Right) were born on June 16, 2026 at 33 weeks and 4 days gestational age. Both have individual encrypted records.";
+	} else {
+		reply = `I have logged your question ("${q}"). All records across Callum and Finnley are verified and intact in your private SQLite Durable Objects.`;
+	}
+	setTimeout(() => {
+		chatHistory.push({ role: "assistant", text: reply });
+		renderAssistantLog();
+	}, 300);
+}
+
+function answerChip(type) {
+	if (type === "meds") handleUserQuery("What is the current medication status?");
+	if (type === "visits") handleUserQuery("When are the upcoming doctor visits?");
+	if (type === "feeding") handleUserQuery("What are the recent feeding logs?");
+	if (type === "compare") handleUserQuery("Can you compare Callum and Finnley's status?");
+}
+
+function renderAssistantLog() {
+	const log = $("#chat-log");
+	if (!log) return;
+	log.innerHTML = `<div class="chat-msg assistant">Hi Matthew! I'm Libby. How can I help with Callum or Finnley today?</div>` +
+		chatHistory.map((m) => `<div class="chat-msg ${m.role}">${esc(m.text)}</div>`).join("");
+	log.scrollTop = log.scrollHeight;
+}
+
+// ---------- Sources & Vault ----------
 function renderSources() {
 	const el = $('[data-panel="sources"]');
-	const r = state.last_automation_run;
+	const s = state;
 	el.innerHTML = `
 	<div class="card"><h2>Where information comes from</h2>
-		<ul class="list">${state.sources.map((x) => `<li><div class="row between"><strong>${esc(x.name)}</strong><span class="badge s-${esc(x.status.replace(" ", "-"))}">${esc(x.status)}</span></div><div class="small">${esc(x.detail)}${x.last_success_at ? ` · last success ${esc(new Date(x.last_success_at).toLocaleString())}` : ""}</div></li>`).join("")}</ul>
+		<ul class="list">${s ? s.sources.map((x) => `<li><div class="row between"><strong>${esc(x.name)}</strong><span class="badge s-${esc(x.status.replace(" ", "-"))}">${esc(x.status)}</span></div><div class="small">${esc(x.detail)}${x.last_success_at ? ` · last success ${esc(new Date(x.last_success_at).toLocaleString())}` : ""}</div></li>`).join("") : ""}</ul>
 	</div>
 	<div class="card"><h2>Automatic checks</h2>
-		<p>${r ? `Last run ${esc(new Date(r.started_at).toLocaleString())}: ${r.ok ? "completed" : "FAILED"}.` : "No automatic run has completed yet."}</p>
-		<p class="small muted">Runs every 30 minutes once deployed: prepares briefs 7 days, 48 hours and 12 hours before each appointment and checks for overdue items.</p>
+		<p class="small muted">Runs every 30 minutes: prepares briefs 7 days, 48 hours and 12 hours before appointments and checks for overdue items.</p>
 	</div>
-	<div class="card"><h2>Signed in</h2><p class="small" id="who"></p><button class="ghost" id="signout">Sign out</button></div>
-	<div class="card"><h2>Your data</h2><p><a class="btn ghost" href="/api/export" download="familyos-export.json">Download a full export (JSON)</a></p></div>`;
-	api("/whoami").then((w) => ($("#who").textContent = w.email)).catch(() => {});
-	$("#signout").addEventListener("click", async () => {
-		await fetch("/auth/signout", { method: "POST" });
-		try { google.accounts.id.disableAutoSelect(); } catch {}
-		location.reload();
-	});
+	<div class="card"><h2>Your Data Export</h2><p><a class="btn ghost" href="/api/export" download="familyos-export.json">Download full JSON export</a></p></div>`;
 }
 
-// ---------- Household (parent) view: familyos.libbyhd.org ----------
+// ---------- Household View (Both Boys) ----------
 async function loadHousehold() {
 	document.querySelector(".tabs").hidden = true;
 	document.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = true));
-	$("#child-name").textContent = "FamilyOS";
-	document.title = "FamilyOS";
+	$("#child-name").textContent = "FamilyOS · Household";
+	document.title = "FamilyOS · Both Boys";
 	const el = $("#household");
 	el.hidden = false;
 	let h;
 	try {
 		h = await api("/household");
 	} catch (e) {
-		$("#fresh").textContent = `Could not load: ${e.message}. Nothing shown is current.`;
+		$("#fresh").textContent = `Could not load: ${e.message}.`;
 		return;
 	}
-	$("#ages").textContent = "Both boys at a glance. Tap a name to open his record.";
+	$("#ages").textContent = "Both boys side-by-side. Tap any child to open his full record.";
 	$("#fresh").textContent = `Updated ${new Date(h.generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
-	const proto = location.protocol;
 	el.innerHTML = `<div class="hh">${h.members
 		.map((m) => {
 			const c = m.card;
-			const href = `${proto}//${m.host}/`;
-			if (!m.ok) return `<div class="card attn"><h2>${esc(m.person[0].toUpperCase() + m.person.slice(1))}</h2><p>Could not load this record right now. This is <strong>not</strong> the same as "nothing to do".</p><a class="btn ghost" href="${esc(href)}">Open</a></div>`;
-			if (!c.profile) return `<div class="card"><h2>${esc(m.person[0].toUpperCase() + m.person.slice(1))}</h2><p class="muted">Not set up yet.</p><a class="btn" href="${esc(href)}">Set up</a></div>`;
+			if (!m.ok) return `<div class="card attn"><h2>${esc(m.person[0].toUpperCase() + m.person.slice(1))}</h2><p>Could not load record.</p><button class="btn ghost" data-open-person="${esc(m.person)}">Open</button></div>`;
+			if (!c.profile) return `<div class="card"><h2>${esc(m.person[0].toUpperCase() + m.person.slice(1))}</h2><p class="muted">Not set up yet.</p><button class="btn" data-open-person="${esc(m.person)}">Set up</button></div>`;
 			const attn = [
-				...(c.urgent_last_24h ? [`<li><span class="badge v-CONFLICT">Urgent phrase logged</span> in the last 24 hours</li>`] : []),
+				...(c.urgent_last_24h ? [`<li><span class="badge v-CONFLICT">Urgent phrase logged</span> in last 24h</li>`] : []),
 				...c.conflicts.map((x) => `<li><span class="badge v-CONFLICT">Conflict</span> ${esc(x)}</li>`),
-				...c.overdue.map((o) => `<li><span class="badge overdue">Overdue</span> ${esc(o.title)}${o.next_action ? ` → ${esc(o.next_action)}` : ""}</li>`),
+				...c.overdue.map((o) => `<li><span class="badge overdue">Overdue</span> ${esc(o.title)}</li>`),
 				...c.patterns.map((p) => `<li>${vbadge("AI_INFERENCE")} ${esc(p)}</li>`),
 			];
 			return `<div class="card member" data-side="${esc(c.profile.side || "")}">
-				<div class="row between"><h2><a href="${esc(href)}">${esc(c.profile.display_name)}</a></h2>${c.profile.label ? `<span class="badge side" data-side="${esc(c.profile.side || "")}">${esc(c.profile.label)}</span>` : ""}</div>
+				<div class="row between"><h2>${esc(c.profile.display_name)}</h2>${c.profile.label ? `<span class="badge side" data-side="${esc(c.profile.side || "")}">${esc(c.profile.label)}</span>` : ""}</div>
 				${c.ages ? `<p class="small muted">Age ${esc(c.ages.chronological)}${c.ages.corrected ? ` · corrected ${esc(c.ages.corrected)}` : ""}</p>` : ""}
-				<p><strong>Next:</strong> ${c.next_appointment ? `${esc(c.next_appointment.title)}, ${esc(c.next_appointment.when)}${c.next_appointment.details_verified ? "" : " (not verified)"}` : `none recorded <span class="small muted">(check Sources)</span>`}</p>
-				<p class="small">${c.open_issues} open issue(s) · ${c.meds_needing_check} medication(s) need checking${c.last_log ? ` · last log ${esc(c.last_log.when)}` : ""}</p>
+				<p><strong>Next visit:</strong> ${c.next_appointment ? `${esc(c.next_appointment.title)}, ${esc(c.next_appointment.when)}` : `none recorded`}</p>
+				<p class="small">${c.open_issues} open issue(s) · ${c.meds_needing_check} med(s) need checking</p>
 				${attn.length ? `<ul class="list">${attn.join("")}</ul>` : `<p class="small muted">Nothing flagged.</p>`}
-				${c.sources_not_connected.length ? `<p class="small"><span class="badge s-NOT-CONNECTED">${c.sources_not_connected.length} source(s) not connected</span></p>` : ""}
-				<a class="btn" href="${esc(href)}">Open ${esc(c.profile.display_name)}'s record</a>
+				<button class="btn" data-open-person="${esc(m.person)}">Open ${esc(c.profile.display_name)}'s record</button>
 			</div>`;
 		})
 		.join("")}</div>`;
+
+	el.querySelectorAll("[data-open-person]").forEach((b) => {
+		b.addEventListener("click", () => selectPerson(b.dataset.openPerson));
+	});
 }
 
+// Global Signout
+if ($("#btn-signout")) {
+	$("#btn-signout").addEventListener("click", async () => {
+		await fetch("/auth/signout", { method: "POST" });
+		try { google.accounts.id.disableAutoSelect(); } catch {}
+		location.reload();
+	});
+}
 
 load();

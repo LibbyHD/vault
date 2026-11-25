@@ -5,7 +5,7 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 		<meta name="robots" content="noindex, nofollow" />
 		<meta name="theme-color" content="#14161a" />
-		<title>FamilyOS</title>
+		<title>LibbyHD — Family Operating System</title>
 		<link rel="manifest" href="/manifest.webmanifest" />
 		<link rel="icon" href="/icon.svg" type="image/svg+xml" />
 		<link rel="apple-touch-icon" href="/icon.svg" />
@@ -13,6 +13,25 @@
 	</head>
 	<body>
 		<a class="skip" href="#main">Skip to content</a>
+
+		<nav class="nav-global" aria-label="Global Navigation">
+			<div class="nav-inner">
+				<div class="brand">
+					<span class="brand-badge">⚡</span>
+					<span class="brand-title">LibbyHD</span>
+				</div>
+				<div class="switcher" id="person-switcher" role="group" aria-label="Select person or household view">
+					<button type="button" class="switch-btn" data-person="household" aria-pressed="true">👨‍👩‍👦‍👦 Both Boys</button>
+					<button type="button" class="switch-btn side-left" data-person="callum" aria-pressed="false">Callum</button>
+					<button type="button" class="switch-btn side-right" data-person="finnley" aria-pressed="false">Finnley</button>
+				</div>
+				<div class="user-meta">
+					<span id="who-email" class="small muted"></span>
+					<button id="btn-signout" class="ghost small btn-compact" title="Sign out">Log out</button>
+				</div>
+			</div>
+		</nav>
+
 		<header class="top" id="top">
 			<div class="who">
 				<h1 id="child-name">FamilyOS</h1>
@@ -28,7 +47,8 @@
 			<button data-tab="issues">Issues</button>
 			<button data-tab="record">Record</button>
 			<button data-tab="letters">Story</button>
-			<button data-tab="sources">Sources</button>
+			<button data-tab="assistant">Libby AI</button>
+			<button data-tab="sources">Vault & Sources</button>
 		</nav>
 
 		<main id="main" tabindex="-1">
@@ -38,6 +58,7 @@
 			<section data-panel="issues" hidden></section>
 			<section data-panel="record" hidden></section>
 			<section data-panel="letters" hidden></section>
+			<section data-panel="assistant" hidden></section>
 			<section data-panel="sources" hidden></section>
 		</main>
 

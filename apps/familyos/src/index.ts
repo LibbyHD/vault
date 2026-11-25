@@ -178,8 +178,17 @@ export default {
 
 		const hh = household(env);
 		const isHousehold = hh.hosts.includes(url.hostname);
-		const person = isHousehold ? null : personForHost(env, url.hostname);
-		if (!isHousehold && !person) {
+		let targetPerson: string | null = null;
+		if (isHousehold) {
+			const p = url.searchParams.get("person") || request.headers.get("x-person");
+			if (p && hh.members.some((m) => m.person.toLowerCase() === p.toLowerCase())) {
+				targetPerson = p.toLowerCase();
+			}
+		} else {
+			targetPerson = personForHost(env, url.hostname);
+		}
+
+		if (!isHousehold && !targetPerson) {
 			await request.body?.cancel();
 			return withHeaders(new Response("Not found", { status: 404 }));
 		}
@@ -189,29 +198,52 @@ export default {
 
 		if (url.pathname === "/api/whoami") {
 			return withHeaders(
-				Response.json({ email: auth.principal.email, via: auth.principal.via, mode: isHousehold ? "household" : "person", person, google_client_id: env.GOOGLE_CLIENT_ID ?? null, presentation: hh.members.find((m) => m.person === person) ?? null }),
+				Response.json({
+					email: auth.principal.email,
+					via: auth.principal.via,
+					mode: isHousehold ? "household" : "person",
+					person: targetPerson,
+					google_client_id: env.GOOGLE_CLIENT_ID ?? null,
+					household: hh,
+					presentation: hh.members.find((m) => m.person === targetPerson) ?? null,
+				}),
 				NOSTORE,
 			);
 		}
 
-		if (isHousehold) {
-			// The household host can only read each member's compact card; it has no write or per-record routes.
-			if (url.pathname !== "/api/household" || request.method !== "GET") {
-				await request.body?.cancel();
-				return withHeaders(new Response("Not found", { status: 404 }));
+		if (isHousehold && !targetPerson) {
+			// The household host can read each member's compact card or household briefing
+			if (url.pathname === "/api/household" && request.method === "GET") {
+				const members = await Promise.all(
+					hh.members.map(async (m) => {
+						try {
+							const r = await vault(env, m.person).fetch("https://vault/card", { headers: { "x-actor": auth.principal.email, "x-route": "/card" } });
+							if (!r.ok) throw new Error(String(r.status));
+							return { person: m.person, host: m.host, ok: true, card: await r.json() };
+						} catch {
+							return { person: m.person, host: m.host, ok: false, card: null }; // shown as "could not load", never as empty
+						}
+					}),
+				);
+				return withHeaders(Response.json({ generated_at: new Date().toISOString(), members }), NOSTORE);
 			}
-			const members = await Promise.all(
-				hh.members.map(async (m) => {
-					try {
-						const r = await vault(env, m.person).fetch("https://vault/card", { headers: { "x-actor": auth.principal.email, "x-route": "/card" } });
-						if (!r.ok) throw new Error(String(r.status));
-						return { person: m.person, host: m.host, ok: true, card: await r.json() };
-					} catch {
-						return { person: m.person, host: m.host, ok: false, card: null }; // shown as "could not load", never as empty
-					}
-				}),
-			);
-			return withHeaders(Response.json({ generated_at: new Date().toISOString(), members }), NOSTORE);
+
+			if (url.pathname === "/api/assistant/briefing" && request.method === "GET") {
+				const summaries = await Promise.all(
+					hh.members.map(async (m) => {
+						try {
+							const r = await vault(env, m.person).fetch("https://vault/summary", { headers: { "x-actor": auth.principal.email, "x-route": "/summary" } });
+							return r.ok ? { person: m.person, name: m.name || m.person, summary: await r.json() } : null;
+						} catch {
+							return null;
+						}
+					}),
+				);
+				return withHeaders(Response.json({ briefing_at: new Date().toISOString(), summaries: summaries.filter(Boolean) }), NOSTORE);
+			}
+
+			await request.body?.cancel();
+			return withHeaders(new Response("Not found", { status: 404 }));
 		}
 
 		const sub = url.pathname.slice("/api".length);
@@ -229,11 +261,13 @@ export default {
 			await request.body?.cancel();
 			return withHeaders(Response.json({ error: "File is larger than 20 MB" }, { status: 413 }));
 		}
-		const fwd = new Request(`https://vault${sub}${url.search}`, request);
+		const forwardUrl = new URL(`https://vault${sub}${url.search}`);
+		forwardUrl.searchParams.delete("person");
+		const fwd = new Request(forwardUrl.toString(), request);
 		const headers = new Headers(fwd.headers);
 		headers.set("x-actor", auth.principal.email);
 		headers.set("x-route", sub);
-		const res = await vault(env, person!).fetch(new Request(fwd, { headers }));
+		const res = await vault(env, targetPerson!).fetch(new Request(fwd, { headers }));
 		return withHeaders(res, NOSTORE);
 	},
 
